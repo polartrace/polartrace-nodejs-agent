@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.0.12] - 2026-08-01
 
 ### Added
+- PostgreSQL span collection via `pg` require hooking — query spans with `db.system`/`db.operation`/`db.sql.table`/`db.statement` attributes (opt-out: `POLARTRACE_DISABLE_POSTGRES_SPANS`)
 - Redis span collection via `ioredis`/`redis` require hooking (opt-out: `POLARTRACE_DISABLE_REDIS_SPANS`)
 - Host metrics sampling: process CPU/memory, event-loop lag percentiles, host load/memory, container cgroup limits (opt-out: `POLARTRACE_DISABLE_HOST_METRICS`)
 - `POLARTRACE_ENDPOINT` environment variable to override the collector URL

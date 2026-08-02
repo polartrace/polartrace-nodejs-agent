@@ -15,6 +15,10 @@ import {
   RedisInstrumentation,
   RedisSdkSpan,
 } from "./instrumentations/redis.instrumentation";
+import {
+  PostgresInstrumentation,
+  PostgresSdkSpan,
+} from "./instrumentations/postgres.instrumentation";
 
 // Host (CPU / memory / event-loop) metrics
 import {
@@ -44,6 +48,13 @@ export interface PolarTraceConfig {
    * use Redis and MongoDB together produce a single coherent trace.
    */
   enableRedisSpanCollection?: boolean;
+  /**
+   * Enable custom PostgreSQL span collection (`pg` driver).
+   * When true (the default), the agent patches pg's Client.query (which also
+   * covers Pool.query) and emits Postgres query spans via the same pipeline
+   * as Mongo / Redis / HTTP spans.
+   */
+  enablePostgresSpanCollection?: boolean;
   /**
    * Enable host metrics collection (CPU, memory, event-loop lag).
    * When true (the default), the agent samples `process.*` / `os.*` / event-loop
@@ -154,6 +165,7 @@ class PolarTrace {
       captureConsoleLogs: true,
       enableMongoSpanCollection: true,
       enableRedisSpanCollection: true,
+      enablePostgresSpanCollection: true,
       enableHostMetrics: true,
       endpoint: defaultEndpoint,
       ...config,
@@ -484,6 +496,9 @@ class PolarTrace {
     const redisOk =
       !this.config.enableRedisSpanCollection ||
       !!(globalThis as any).__POLARTRACE_REDIS_INSTRUMENTATION_ENABLED__;
+    const postgresOk =
+      !this.config.enablePostgresSpanCollection ||
+      !!(globalThis as any).__POLARTRACE_POSTGRES_INSTRUMENTATION_ENABLED__;
     const connectionOk = this.connectionStatus === "connected";
     const connectionFailed = this.connectionStatus === "failed";
 
@@ -495,9 +510,10 @@ class PolarTrace {
     const httpStatus = httpOk ? "☑️ OK" : "❌ ERROR";
     const mongoStatus = mongoOk ? "☑️ OK" : "❌ ERROR";
     const redisStatus = redisOk ? "☑️ OK" : "❌ ERROR";
+    const postgresStatus = postgresOk ? "☑️ OK" : "❌ ERROR";
     const connectionStatus = connectionOk ? "☑️ OK" : "❌ ERROR";
 
-    const allOk = httpOk && mongoOk && redisOk && connectionOk;
+    const allOk = httpOk && mongoOk && redisOk && postgresOk && connectionOk;
 
     if (allOk) {
       // Simple one-line success message
@@ -548,6 +564,12 @@ class PolarTrace {
     if (!redisOk) {
       const connectionName = "Redis Agent".padEnd(connectionColWidth);
       const statusDisplay = redisStatus.padEnd(statusColWidth);
+      const reasonDisplay = "-".padEnd(reasonColWidth);
+      statusMessage += `│ ${connectionName} │ ${statusDisplay} │ ${reasonDisplay} │\n`;
+    }
+    if (!postgresOk) {
+      const connectionName = "Postgres Agent".padEnd(connectionColWidth);
+      const statusDisplay = postgresStatus.padEnd(statusColWidth);
       const reasonDisplay = "-".padEnd(reasonColWidth);
       statusMessage += `│ ${connectionName} │ ${statusDisplay} │ ${reasonDisplay} │\n`;
     }
@@ -664,6 +686,25 @@ class PolarTrace {
         }
 
         (globalThis as any).__POLARTRACE_REDIS_INSTRUMENTATION_ENABLED__ = true;
+      }
+
+      if (this.config.enablePostgresSpanCollection) {
+        const postgresCallback = (pgSpan: PostgresSdkSpan) => {
+          const traceSpan = this.convertPostgresSpanToTraceSpan(pgSpan);
+          this.queueTraceSpan(traceSpan);
+        };
+
+        const updated =
+          instrumentationManager.updatePostgresCallback(postgresCallback);
+
+        if (!updated) {
+          instrumentationManager.register(
+            new PostgresInstrumentation(postgresCallback),
+          );
+          instrumentationManager.enableAll();
+        }
+
+        (globalThis as any).__POLARTRACE_POSTGRES_INSTRUMENTATION_ENABLED__ = true;
       }
     } catch (error: any) {
       this.writeToLogFile(
@@ -877,6 +918,46 @@ class PolarTrace {
         "db.redis.library": redisSpan.attributes.library,
         "db.statement.key": redisSpan.attributes.key,
         ...redisSpan.attributes,
+      },
+    };
+  }
+
+  /**
+   * Convert a Postgres SDK span into the generic TraceSpan format.
+   * Attribute keys follow OTel semconv (db.system / db.operation /
+   * db.sql.table / db.statement) so the console's Database views pick the
+   * spans up without any server-side changes.
+   */
+  private convertPostgresSpanToTraceSpan(pgSpan: PostgresSdkSpan): TraceSpan {
+    const startMs = pgSpan.startTime || Date.now();
+    const endMs = pgSpan.endTime ?? Date.now();
+    const durationMs = pgSpan.durationMs ?? endMs - startMs;
+
+    const traceId = pgSpan.traceId || this.generateUUID();
+
+    const parentSpanIdUUID = pgSpan.parentSpanId
+      ? this.convertSpanIdToUUID(pgSpan.parentSpanId)
+      : undefined;
+
+    return {
+      traceId,
+      spanId: this.generateUUID(),
+      parentSpanId: parentSpanIdUUID,
+      name: pgSpan.name,
+      kind: "CLIENT",
+      startTime: startMs * 1_000_000,
+      endTime: endMs * 1_000_000,
+      duration: durationMs,
+      status: {
+        code: pgSpan.error ? "ERROR" : "OK",
+        message: pgSpan.error?.message,
+      },
+      attributes: {
+        "db.system": "postgresql",
+        "db.operation": pgSpan.attributes.operation,
+        "db.sql.table": pgSpan.attributes.table,
+        "db.statement": pgSpan.attributes.statement,
+        ...pgSpan.attributes,
       },
     };
   }
@@ -1590,6 +1671,11 @@ function autoInitFromEnv() {
     disableRedisEnv === "1" || disableRedisEnv?.toLowerCase() === "true"
   );
 
+  const disablePostgresEnv = process.env.POLARTRACE_DISABLE_POSTGRES_SPANS;
+  const enablePostgresSpanCollection = !(
+    disablePostgresEnv === "1" || disablePostgresEnv?.toLowerCase() === "true"
+  );
+
   const endpoint = process.env.POLARTRACE_ENDPOINT?.trim() || undefined;
 
   const agent = new PolarTrace({
@@ -1599,6 +1685,7 @@ function autoInitFromEnv() {
     enableHostMetrics,
     enableMongoSpanCollection,
     enableRedisSpanCollection,
+    enablePostgresSpanCollection,
     ...(endpoint ? { endpoint } : {}),
   });
 

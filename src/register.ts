@@ -16,14 +16,17 @@ registerTypeScriptLoaderIfNeeded();
 import { InstrumentationManager } from "./instrumentations/instrumentation-manager";
 import { MongoInstrumentation } from "./instrumentations/mongo.instrumentation";
 import { RedisInstrumentation } from "./instrumentations/redis.instrumentation";
+import { PostgresInstrumentation } from "./instrumentations/postgres.instrumentation";
 
 const manager = InstrumentationManager.getInstance();
 
 manager.register(new MongoInstrumentation(() => {}));
 manager.register(new RedisInstrumentation(() => {}));
+manager.register(new PostgresInstrumentation(() => {}));
 
 manager.enableAll();
 
 // Status-summary flags (read by showConnectionStatus in index.ts)
 (globalThis as any).__POLARTRACE_MONGO_INSTRUMENTATION_ENABLED__ = true;
 (globalThis as any).__POLARTRACE_REDIS_INSTRUMENTATION_ENABLED__ = true;
+(globalThis as any).__POLARTRACE_POSTGRES_INSTRUMENTATION_ENABLED__ = true;

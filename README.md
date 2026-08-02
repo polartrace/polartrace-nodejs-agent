@@ -70,6 +70,7 @@ All configuration is done via environment variables. No code changes required!
 - `POLARTRACE_DISABLE_HOST_METRICS`: Set to `"1"`/`"true"` to disable CPU/memory/event-loop host metrics
 - `POLARTRACE_DISABLE_MONGO_SPANS`: Set to `"1"`/`"true"` to disable MongoDB span collection
 - `POLARTRACE_DISABLE_REDIS_SPANS`: Set to `"1"`/`"true"` to disable Redis span collection
+- `POLARTRACE_DISABLE_POSTGRES_SPANS`: Set to `"1"`/`"true"` to disable PostgreSQL span collection
 
 ### Default Behavior
 
@@ -79,6 +80,7 @@ All configuration is done via environment variables. No code changes required!
 - **Capture Console Logs**: Enabled by default
 - **MongoDB Span Collection**: Enabled by default
 - **Redis Span Collection**: Enabled by default
+- **PostgreSQL Span Collection** (`pg` driver): Enabled by default
 - **Host Metrics** (CPU, memory, event-loop lag): Enabled by default
 
 ### Agent Log File

@@ -120,6 +120,11 @@ class CustomSpanProcessor implements SpanProcessor {
         return;
       }
 
+      // Postgres span filtering - Postgres spans are handled by custom SDK
+      if (this.isPostgresSpanFromOTEL(span)) {
+        return;
+      }
+
       // Filter out low-level internal spans (TCP connections, DNS lookups, etc.)
       if (this.isInternalNoiseSpan(span)) {
         return;
@@ -239,6 +244,17 @@ class CustomSpanProcessor implements SpanProcessor {
       dbSystem === "redis" ||
       spanName.startsWith("redis") ||
       spanName.startsWith("ioredis")
+    );
+  }
+
+  private isPostgresSpanFromOTEL(span: ReadableSpan): boolean {
+    const attributes = span.attributes || {};
+    const dbSystem = attributes["db.system"];
+    const spanName = span.name?.toLowerCase() || "";
+    return (
+      dbSystem === "postgresql" ||
+      spanName.startsWith("pg.") ||
+      spanName.startsWith("pg-pool")
     );
   }
 
