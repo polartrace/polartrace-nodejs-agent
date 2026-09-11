@@ -1,0 +1,13 @@
+{
+  "name": "polartrace-example-express-basic",
+  "private": true,
+  "version": "2.0.0",
+  "description": "Minimal Express app monitored by the PolarTrace agent",
+  "scripts": {
+    "start": "node -r polartrace server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "polartrace": "^2.0.0"
+  }
+}

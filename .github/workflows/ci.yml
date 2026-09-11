@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [18, 20, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+
+      - name: Agent loads cleanly
+        run: node -e "require('./dist/index.js')"
+
+      - name: Agent stays inert and silent without configuration
+        run: |
+          node -r ./dist/index.js -e "console.log('app ran')"
+          test ! -e polartrace_agent.log || {
+            echo "agent created a log file in the working directory"; exit 1;
+          }
+
+      - name: Misconfiguration disables the agent without killing the host process
+        env:
+          POLARTRACE_APP_NAME: ci-service
+          POLARTRACE_LICENSE_KEY: too-short
+        run: |
+          output=$(node -r ./dist/index.js -e "console.log('app ran')" 2>&1)
+          echo "$output"
+          grep -q 'app ran' <<<"$output" || { echo "host process did not run"; exit 1; }
+          grep -q '^\[polartrace\] agent disabled:' <<<"$output" \
+            || { echo "agent did not report why it disabled itself"; exit 1; }
+
+      - name: Published package contains no internal comments
+        run: |
+          ! grep -rn 'polartrace-collector\|Silent fail\|CRITICAL' dist/

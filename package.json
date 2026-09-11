@@ -1,0 +1,118 @@
+{
+  "name": "polartrace",
+  "version": "2.0.0",
+  "description": "Zero-code observability agent for Node.js: distributed tracing, request logs and host metrics for Express, NestJS, Fastify and Koa apps, with automatic MongoDB, PostgreSQL and Redis instrumentation. Built on OpenTelemetry.",
+  "keywords": [
+    "polartrace",
+    "observability",
+    "monitoring",
+    "apm",
+    "opentelemetry",
+    "otel",
+    "tracing",
+    "distributed-tracing",
+    "telemetry",
+    "instrumentation",
+    "profiling",
+    "performance",
+    "logging",
+    "metrics",
+    "express",
+    "nestjs",
+    "fastify",
+    "koa",
+    "mongodb",
+    "mongoose",
+    "postgres",
+    "postgresql",
+    "redis"
+  ],
+  "homepage": "https://www.polartrace.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/polartrace/polartrace-nodejs-agent.git"
+  },
+  "bugs": {
+    "url": "https://github.com/polartrace/polartrace-nodejs-agent/issues"
+  },
+  "license": "MIT",
+  "author": "PolarTrace",
+  "engines": {
+    "node": ">=18"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./register": {
+      "require": "./dist/register.js",
+      "import": "./dist/register.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "sideEffects": [
+    "./dist/index.js",
+    "./dist/register.js"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "prepublishOnly": "npm run build",
+    "lint": "eslint \"src/**/*.ts\""
+  },
+  "peerDependencies": {
+    "express": "^4.0.0",
+    "fastify": "^4.0.0 || ^5.0.0",
+    "koa": "^2.0.0 || ^3.0.0",
+    "mongoose": ">=6"
+  },
+  "peerDependenciesMeta": {
+    "express": {
+      "optional": true
+    },
+    "fastify": {
+      "optional": true
+    },
+    "koa": {
+      "optional": true
+    },
+    "mongoose": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/auto-instrumentations-node": "^0.79.0",
+    "@opentelemetry/instrumentation": "^0.221.0",
+    "@opentelemetry/instrumentation-express": "^0.69.0",
+    "@opentelemetry/instrumentation-fastify": "^0.57.0",
+    "@opentelemetry/instrumentation-http": "^0.221.0",
+    "@opentelemetry/resources": "^2.0.0",
+    "@opentelemetry/sdk-node": "^0.221.0",
+    "@opentelemetry/sdk-trace-base": "^2.0.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.10.0",
+    "@typescript-eslint/eslint-plugin": "^8.69.0",
+    "@typescript-eslint/parser": "^8.69.0",
+    "eslint": "^8.57.1",
+    "express": "^4.18.2",
+    "typescript": "^5.3.3"
+  },
+  "overrides": {
+    "qs": "^6.16.0"
+  }
+}
