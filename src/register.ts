@@ -3,7 +3,7 @@
 // redis) are patched BEFORE the host application requires them.
 //
 // Each instrumentation is registered with a no-op callback here; the
-// PolarTrace constructor in index.ts rewires both to the real pipeline via
+// Polartrace constructor in index.ts rewires both to the real pipeline via
 // `InstrumentationManager.update{Mongo,Redis}Callback` once the agent boots.
 
 // IMPORTANT: register the TypeScript loader FIRST, before any other agent

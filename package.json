@@ -27,7 +27,7 @@
     "postgresql",
     "redis"
   ],
-  "homepage": "https://www.polartrace.com",
+  "homepage": "https://www.polartrace.io",
   "repository": {
     "type": "git",
     "url": "https://github.com/polartrace/polartrace-nodejs-agent.git"
@@ -36,7 +36,7 @@
     "url": "https://github.com/polartrace/polartrace-nodejs-agent/issues"
   },
   "license": "MIT",
-  "author": "PolarTrace",
+  "author": "Polartrace",
   "engines": {
     "node": ">=18"
   },

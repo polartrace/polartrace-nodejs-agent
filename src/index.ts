@@ -65,6 +65,24 @@ export interface PolarTraceConfig {
   captureQuery?: boolean;
   captureConsoleLogs?: boolean;
   /**
+   * Record requests for paths the application has no route for.
+   *
+   * Off by default. Public services are continuously scanned for paths that
+   * do not exist (`/vendor/phpunit/...`, `/index.php`, `/containers/json`),
+   * and recording those buries the real endpoints: a service with five APIs
+   * reports thousands of "requests" that never reached any handler, and the
+   * endpoint list fills with paths the team does not own.
+   *
+   * A request is only dropped when BOTH the framework matched no route AND
+   * the response was 404. A matched route returning 404 (a real call for a
+   * missing record) is still recorded, and so is anything served without a
+   * route by middleware, such as a static file.
+   *
+   * Set true to record everything, which is useful when you are specifically
+   * hunting misrouted traffic.
+   */
+  recordUnmatchedRoutes?: boolean;
+  /**
    * Enable custom MongoDB + Mongoose span collection.
    * When true, the agent will patch mongodb/mongoose and emit Mongo spans
    * via the same pipeline as other OpenTelemetry spans.
@@ -144,7 +162,7 @@ interface QueuedHostMetric {
 
 type ConnectionStatus = "pending" | "connected" | "failed";
 
-class PolarTrace {
+class Polartrace {
   private config: Required<
     Omit<PolarTraceConfig, "endpoint" | "mongoose" | "logFile">
   > & {
@@ -207,6 +225,8 @@ class PolarTrace {
       captureBody: true,
       captureQuery: true,
       captureConsoleLogs: true,
+      // Scanner probes for paths the app does not serve are noise, not traffic.
+      recordUnmatchedRoutes: false,
       enableMongoSpanCollection: true,
       enableRedisSpanCollection: true,
       enablePostgresSpanCollection: true,
@@ -370,7 +390,7 @@ class PolarTrace {
 
     if (this.config.apiKey.length < 10) {
       throw new Error(
-        "apiKey does not look like a PolarTrace license key (set POLARTRACE_LICENSE_KEY)",
+        "apiKey does not look like a Polartrace license key (set POLARTRACE_LICENSE_KEY)",
       );
     }
   }
@@ -613,7 +633,7 @@ class PolarTrace {
   /**
    * Initialize trace monitoring SYNCHRONOUSLY in constructor
    * This ensures OpenTelemetry SDK starts immediately, before mongoose is required
-   * This allows users to use PolarTrace without any code changes
+   * This allows users to use Polartrace without any code changes
    */
   private initializeTraceMonitoringSync(): void {
     try {
@@ -650,6 +670,7 @@ class PolarTrace {
         serviceName: this.config.serviceName,
         serviceVersion: AGENT_VERSION,
         excludeAgentSpans: true, // Filter out agent's own HTTP calls
+        recordUnmatchedRoutes: this.config.recordUnmatchedRoutes,
         agentEndpoints:
           agentEndpointPatterns.length > 0 ? agentEndpointPatterns : undefined,
         sharedSpanIdMap: this.spanIdMap, // Share spanIdMap to maintain parent-child relationships
@@ -1255,7 +1276,12 @@ class PolarTrace {
             requestLog.consoleLogs = capturedLogs;
           }
         }
-        this.logRequest(requestLog as RequestLog);
+        // koa-router records the matched path on the context; without a router
+        // match a 404 means nothing handled the request.
+        const koaRoute = ctx._matchedRoute ?? ctx.routerPath ?? ctx.router?.match;
+        if (!this.isUnmatchedRouteProbe(koaRoute, requestLog.statusCode)) {
+          this.logRequest(requestLog as RequestLog);
+        }
       }
       if (thrown) throw thrown;
     };
@@ -1351,6 +1377,11 @@ class PolarTrace {
           name: state.error?.name,
         };
       }
+      // Fastify exposes the matched route pattern (v4 `routeOptions.url`,
+      // v3 `routerPath`); its 404 handler runs with neither set.
+      const fastifyRoute =
+        request.routeOptions?.url ?? request.routerPath ?? request.context?.config?.url;
+      if (this.isUnmatchedRouteProbe(fastifyRoute, reply.statusCode)) return;
       this.logRequest(requestLog as RequestLog);
     });
   }
@@ -1385,6 +1416,12 @@ class PolarTrace {
       if (capturedLogs.length > 0) {
         requestLog.consoleLogs = capturedLogs;
       }
+    }
+
+    // `req.route` is set by Express only when a route handler matched, so an
+    // unmatched scanner probe falling through to finalhandler has none.
+    if (this.isUnmatchedRouteProbe((req as any)?.route, res.statusCode)) {
+      return originalMethod.call(res, data);
     }
 
     // Log the request
@@ -1487,6 +1524,23 @@ class PolarTrace {
 
   private generateRequestId(): string {
     return `${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
+  }
+
+  /**
+   * True when the request never reached a route and 404'd - i.e. a probe for
+   * a path this application does not serve. See `recordUnmatchedRoutes`.
+   *
+   * Both conditions are required on purpose. "No route" alone would discard
+   * static-file and middleware-only responses; "404" alone would discard real
+   * API calls whose handler legitimately reports a missing resource.
+   */
+  private isUnmatchedRouteProbe(
+    matchedRoute: unknown,
+    statusCode: number | undefined,
+  ): boolean {
+    if (this.config.recordUnmatchedRoutes) return false;
+    if (statusCode !== 404) return false;
+    return !matchedRoute;
   }
 
   private logRequest(log: RequestLog): void {
@@ -1968,7 +2022,7 @@ function envFlag(name: string, fallback: boolean): boolean {
 }
 
 /**
- * Auto-initialize PolarTrace when the module is preloaded via `node -r polartrace`.
+ * Auto-initialize Polartrace when the module is preloaded via `node -r polartrace`.
  * Configuration comes from the environment so applications need no code changes.
  *
  * Required:
@@ -2003,9 +2057,9 @@ function autoInitFromEnv() {
   const endpoint = process.env.POLARTRACE_ENDPOINT?.trim() || undefined;
   const logFile = process.env.POLARTRACE_LOG_FILE?.trim() || undefined;
 
-  let agent: PolarTrace;
+  let agent: Polartrace;
   try {
-    agent = new PolarTrace({
+    agent = new Polartrace({
       apiKey,
       serviceName,
       enableConsoleLog: envFlag("POLARTRACE_ENABLE_CONSOLE_LOG", false),
@@ -2057,7 +2111,7 @@ function autoInitFromEnv() {
  * The application stays in charge of its own lifecycle: if it handles the signal itself we
  * only flush, and we exit the process only when nothing else is listening.
  */
-function installShutdownHooks(agent: PolarTrace): void {
+function installShutdownHooks(agent: Polartrace): void {
   const globalObj = globalThis as any;
   if (globalObj.__POLARTRACE_SHUTDOWN_HOOKS__) return;
   globalObj.__POLARTRACE_SHUTDOWN_HOOKS__ = true;
@@ -2087,10 +2141,10 @@ function installShutdownHooks(agent: PolarTrace): void {
 }
 
 /**
- * Automatically attach PolarTrace middleware to Express apps when they're created.
+ * Automatically attach Polartrace middleware to Express apps when they're created.
  * This patches Express so that any app created will automatically have our middleware attached.
  */
-function autoAttachExpressMiddleware(agent: PolarTrace): void {
+function autoAttachExpressMiddleware(agent: Polartrace): void {
   onModuleLoad("express", (module: any) => {
     if (typeof module !== "function") return;
 
@@ -2157,7 +2211,7 @@ function autoAttachExpressMiddleware(agent: PolarTrace): void {
  * fastify() factory so every created instance gets the agent's hooks before
  * any routes are registered.
  */
-function autoAttachFastifyHook(agent: PolarTrace): void {
+function autoAttachFastifyHook(agent: Polartrace): void {
   onModuleLoad("fastify", (module: any) => {
     if (typeof module !== "function") return;
 
@@ -2192,7 +2246,7 @@ function autoAttachFastifyHook(agent: PolarTrace): void {
  * http.createServer(app.callback())) to prepend the agent middleware once
  * per app, keeping the exported class identity intact for subclassing.
  */
-function autoAttachKoaHook(agent: PolarTrace): void {
+function autoAttachKoaHook(agent: Polartrace): void {
   onModuleLoad("koa", (module: any) => {
     if (
       typeof module !== "function" ||
@@ -2296,11 +2350,11 @@ function autoAttachNestErrorHook(): void {
   });
 }
 
-// Export PolarTrace class for testing purposes
+// Export Polartrace class for testing purposes
 // In production, users should use auto-initialization via -r polartrace
-export { PolarTrace };
+export { Polartrace };
 
-// Note: PolarTrace class is exported primarily for testing
+// Note: Polartrace class is exported primarily for testing
 // In production, the agent is used via auto-initialization with environment variables
 // Direct instantiation is supported but auto-init is recommended
 

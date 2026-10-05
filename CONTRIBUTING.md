@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for your interest in improving the PolarTrace Node.js agent!
+Thanks for your interest in improving the Polartrace Node.js agent!
 
 ## Development setup
 

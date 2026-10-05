@@ -36,7 +36,7 @@ class InstrumentationManager {
     /**
      * Find an existing RedisInstrumentation and update its callback so the
      * pre-registered (placeholder) instrumentation from register.ts can be
-     * rewired to the real PolarTrace pipeline once the agent boots.
+     * rewired to the real Polartrace pipeline once the agent boots.
      */
     updateRedisCallback(callback: (span: any) => void): boolean {
         const redisInst = this.instrumentations.find(
@@ -53,7 +53,7 @@ class InstrumentationManager {
     /**
      * Find an existing PostgresInstrumentation and update its callback so the
      * pre-registered (placeholder) instrumentation from register.ts can be
-     * rewired to the real PolarTrace pipeline once the agent boots.
+     * rewired to the real Polartrace pipeline once the agent boots.
      */
     updatePostgresCallback(callback: (span: any) => void): boolean {
         const pgInst = this.instrumentations.find(

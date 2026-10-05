@@ -4,9 +4,9 @@
 [![node](https://img.shields.io/node/v/polartrace.svg)](https://nodejs.org)
 [![license](https://img.shields.io/npm/l/polartrace.svg)](LICENSE)
 
-The Node.js agent for [PolarTrace](https://www.polartrace.com). It collects
+The Node.js agent for [Polartrace](https://www.polartrace.io). It collects
 distributed traces, request logs and host metrics from your service and ships
-them to the PolarTrace collector - without a single line of application code.
+them to the Polartrace collector - without a single line of application code.
 
 Built on [OpenTelemetry](https://opentelemetry.io).
 
@@ -83,7 +83,7 @@ The agent is configured entirely through environment variables.
 | Variable | Description |
 | --- | --- |
 | `POLARTRACE_APP_NAME` | Service name. Must be unique within your organization. |
-| `POLARTRACE_LICENSE_KEY` | Your PolarTrace license key. |
+| `POLARTRACE_LICENSE_KEY` | Your Polartrace license key. |
 
 ### Optional
 
@@ -146,9 +146,9 @@ Preloading is the recommended integration. When you need explicit control over
 configuration, construct the agent yourself:
 
 ```js
-const { PolarTrace } = require("polartrace");
+const { Polartrace } = require("polartrace");
 
-const agent = new PolarTrace({
+const agent = new Polartrace({
   apiKey: process.env.POLARTRACE_LICENSE_KEY,
   serviceName: "checkout-service",
   captureBody: false, // opt out of request-body capture entirely
@@ -180,7 +180,7 @@ app wired up with the agent.
 
 ## Support
 
-- Documentation and dashboards: [polartrace.com](https://www.polartrace.com)
+- Documentation and dashboards: [polartrace.io](https://www.polartrace.io)
 - Bugs and feature requests: [GitHub issues](https://github.com/polartrace/polartrace-nodejs-agent/issues)
 - Security reports: see [SECURITY.md](SECURITY.md)
 

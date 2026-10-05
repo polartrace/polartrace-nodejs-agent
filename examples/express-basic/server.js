@@ -1,4 +1,4 @@
-// Minimal Express app monitored by PolarTrace.
+// Minimal Express app monitored by Polartrace.
 //
 // Run it with the agent preloaded (no code changes needed):
 //

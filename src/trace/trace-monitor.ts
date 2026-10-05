@@ -95,6 +95,8 @@ export interface TraceMonitorConfig {
   serviceVersion?: string;
   onSpan: (span: TraceSpan) => void;
   excludeAgentSpans?: boolean;
+  /** Mirrors PolarTraceConfig.recordUnmatchedRoutes - keep 404s that matched no route. */
+  recordUnmatchedRoutes?: boolean;
   agentEndpoints?: string[];
   sharedSpanIdMap?: Map<string, string>; // Optional shared span ID mapping for consistency across spans
 }
@@ -190,6 +192,13 @@ class CustomSpanProcessor implements SpanProcessor {
 
       // Filter out agent-level spans if configured
       if (this.config.excludeAgentSpans && this.isAgentSpan(span)) {
+        return;
+      }
+
+      // Drop traces for paths the application does not serve, so a scanned
+      // service does not accumulate thousands of traces for routes it has
+      // never had. Matches the request-log rule in index.ts.
+      if (this.isUnmatchedRouteSpan(span)) {
         return;
       }
 
@@ -308,6 +317,29 @@ class CustomSpanProcessor implements SpanProcessor {
       spanName.startsWith("pg.") ||
       spanName.startsWith("pg-pool")
     );
+  }
+
+  /**
+   * A server span for a path that matched no route and answered 404.
+   *
+   * `http.route` is set by the framework instrumentation only when a route
+   * matched, so its absence on a 404 SERVER span marks a probe for an endpoint
+   * this application does not have. Both signals are required: a matched route
+   * may legitimately return 404, and a routeless 200 (a static file) is real
+   * traffic.
+   */
+  private isUnmatchedRouteSpan(span: ReadableSpan): boolean {
+    if (this.config.recordUnmatchedRoutes) return false;
+    if (span.kind !== SpanKind.SERVER) return false;
+
+    const attributes = span.attributes || {};
+    const status = Number(
+      attributes["http.status_code"] ?? attributes["http.response.status_code"],
+    );
+    if (status !== 404) return false;
+
+    const route = attributes["http.route"];
+    return route === undefined || route === null || route === "";
   }
 
   private isInternalNoiseSpan(span: ReadableSpan): boolean {
