@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.1] - 2026-10-05
+
+### Changed
+
+- Requests for paths the application has no route for are no longer recorded.
+  A request (and its trace) is dropped only when the framework matched no route
+  AND the response was 404, so scanner probes such as `/vendor/phpunit/...` or
+  `/index.php` no longer bury the real endpoints. A matched route returning 404
+  and routeless traffic served by middleware (e.g. static files) are still
+  recorded. Applies to Express, Fastify and Koa
+- The exported class is now `Polartrace` (was `PolarTrace`), and the homepage
+  moved to [polartrace.io](https://www.polartrace.io)
+
+### Added
+
+- `recordUnmatchedRoutes` option. Set it to `true` to record unmatched 404s as
+  before, e.g. when hunting misrouted traffic
+
 ## [2.0.0] - 2026-09-12
 
 The first release of the 2.x line - a ground-up hardening of the 1.x agent.

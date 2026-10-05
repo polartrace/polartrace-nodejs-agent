@@ -1,6 +1,6 @@
 {
   "name": "polartrace",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Zero-code observability agent for Node.js: distributed tracing, request logs and host metrics for Express, NestJS, Fastify and Koa apps, with automatic MongoDB, PostgreSQL and Redis instrumentation. Built on OpenTelemetry.",
   "keywords": [
     "polartrace",
