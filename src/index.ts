@@ -2,9 +2,11 @@ import { Request, Response, NextFunction } from "express";
 import { trace as otelTrace } from "@opentelemetry/api";
 import { TraceMonitor, TraceSpan } from "./trace";
 import { randomUUID as uuid } from "crypto";
+import { execFileSync } from "child_process";
 
 import { diagnostics } from "./diagnostics";
 import { onModuleLoad } from "./module-hook";
+import { CapturedLine, LogCapture, StandaloneLine } from "./log-capture";
 
 /**
  * Field names whose values are replaced with [REDACTED] before anything leaves
@@ -63,6 +65,12 @@ export interface PolarTraceConfig {
   captureHeaders?: boolean;
   captureBody?: boolean;
   captureQuery?: boolean;
+  /**
+   * Capture application logs: console output, winston loggers and uncaught
+   * exceptions, from anywhere in the process. Lines written during a request
+   * ride on its request log; every other line ships on its own stream.
+   * On by default (POLARTRACE_DISABLE_LOG_CAPTURE turns it off).
+   */
   captureConsoleLogs?: boolean;
   /**
    * Record requests for paths the application has no route for.
@@ -130,7 +138,7 @@ export interface RequestLog {
   userAgent?: string;
   ip?: string;
   host?: string;
-  consoleLogs?: Array<{ timestamp: string; level: string; args: any[] }>;
+  consoleLogs?: CapturedLine[];
   /**
    * OpenTelemetry trace id (32-char hex, converted to the 32-char UUID form
    * the collector stores on the traces table). Lets the UI join a request log
@@ -176,11 +184,10 @@ class Polartrace {
   private logQueue: QueuedLog[] = [];
   private flushTimer?: NodeJS.Timeout;
   private defaultHeaders: Record<string, string>;
-  private originalConsoleLog?: typeof console.log;
-  private originalConsoleError?: typeof console.error;
-  private originalConsoleWarn?: typeof console.warn;
-  private originalConsoleInfo?: typeof console.info;
+  private logCapture?: LogCapture;
+  private lineQueue: StandaloneLine[] = [];
   private isFlushing: boolean = false;
+  private isLineFlushing: boolean = false;
   private isTraceFlushing: boolean = false;
   private isHostMetricsFlushing: boolean = false;
   private traceMonitor?: TraceMonitor;
@@ -193,6 +200,10 @@ class Polartrace {
   private readonly LOG_QUEUE_LIMIT = 5000; // drop-oldest bound, mirrors host metrics
   private readonly TRACE_QUEUE_LIMIT = 5000; // drop-oldest bound, mirrors host metrics
   private readonly MAX_BATCH_SIZE = 500; // max items shipped per flush tick
+  private readonly LINE_QUEUE_LIMIT = 10000; // drop-oldest bound for standalone log lines
+  private readonly LINE_BATCH_SIZE = 1000; // standalone lines per request to the collector
+  private readonly MAX_LINE_BATCHES_PER_TICK = 5; // a chatty process drains ~500 lines/s
+  private readonly EXIT_FLUSH_TIMEOUT_MS = 2500; // bound on the synchronous send at exit
   private readonly FLUSH_INTERVAL = 10000; // 10 seconds
   private readonly API_TIMEOUT = 10000; // 10 seconds
   private readonly MAX_BACKOFF_MS = 300000; // 5 minutes - retry backoff ceiling
@@ -202,6 +213,8 @@ class Polartrace {
   // skipped; the deadline doubles on each consecutive retained failure.
   private logConsecutiveFailures = 0;
   private logBackoffUntil = 0;
+  private lineConsecutiveFailures = 0;
+  private lineBackoffUntil = 0;
   private traceConsecutiveFailures = 0;
   private traceBackoffUntil = 0;
   private hostMetricsConsecutiveFailures = 0;
@@ -255,6 +268,7 @@ class Polartrace {
 
     this.validateApiKey();
     this.setupFlushTimer();
+    this.initializeLogCapture();
     // We start it synchronously to ensure zero code changes are needed in user's app
     this.initializeTraceMonitoringSync();
     this.initializeHostMetricsMonitoring();
@@ -400,6 +414,8 @@ class Polartrace {
     if (this.config.endpoint) {
       this.flushTimer = setInterval(() => {
         this.flushLogs();
+        this.flushLogLines();
+        this.logCapture?.sweepStaleRequests();
       }, this.FLUSH_INTERVAL);
       this.flushTimer.unref();
 
@@ -414,6 +430,26 @@ class Polartrace {
         this.flushHostMetrics();
       }, this.FLUSH_INTERVAL);
       this.hostMetricsFlushTimer.unref();
+    }
+  }
+
+  /**
+   * Start capturing application logs (console, winston, crashes) for the life
+   * of the process. See log-capture.ts for how a line is routed to its request.
+   */
+  private initializeLogCapture(): void {
+    if (!this.config.captureConsoleLogs) return;
+    try {
+      this.logCapture = new LogCapture({
+        onStandaloneLine: (line) => this.queueStandaloneLine(line),
+        redact: (value) => this.redactSensitive(value),
+      });
+      this.logCapture.installConsole();
+      this.logCapture.installWinston();
+      this.logCapture.installProcessHooks();
+    } catch (err: any) {
+      // Log capture is optional and must never break the host app.
+      diagnostics.warn(`Failed to initialize log capture: ${err?.message ?? err}`);
     }
   }
 
@@ -651,6 +687,7 @@ class Polartrace {
         agentEndpointPatterns.push(
           "/api/traces",
           "/api/log",
+          "/api/log/lines",
           "/api/logs",
           "/api/host-metrics",
           "/api/service/validate",
@@ -660,6 +697,7 @@ class Polartrace {
         agentEndpointPatterns.push(
           `${baseUrl}/api/traces`,
           `${baseUrl}/api/log`,
+          `${baseUrl}/api/log/lines`,
           `${baseUrl}/api/logs`,
           `${baseUrl}/api/host-metrics`,
           `${baseUrl}/api/service/validate`,
@@ -1076,11 +1114,6 @@ class Polartrace {
     return (req: Request, res: Response, next: NextFunction) => {
       const startTimeMs = Date.now();
       const startTime = new Date(startTimeMs).toISOString();
-      const capturedLogs: Array<{
-        timestamp: string;
-        level: string;
-        args: any[];
-      }> = [];
       // Request ID for tracking (can be used for future enhancements)
       this.generateRequestId();
 
@@ -1122,12 +1155,8 @@ class Polartrace {
         requestLog.query = req.query;
       }
 
-      // Intercept console methods if enabled
-      let consoleIntercepted = false;
-      if (this.config.captureConsoleLogs) {
-        this.interceptConsole(capturedLogs);
-        consoleIntercepted = true;
-      }
+      // Lines logged while this request is in flight ride on its request log.
+      const capturedLines = this.logCapture?.openRequest(traceId);
 
       // Capture errors
       const errorHandler = (err: Error) => {
@@ -1153,8 +1182,7 @@ class Polartrace {
             data,
             startTimeMs,
             requestLog,
-            capturedLogs,
-            consoleIntercepted,
+            capturedLines,
           );
         }
         return originalSend.call(res, data);
@@ -1170,8 +1198,7 @@ class Polartrace {
             data,
             startTimeMs,
             requestLog,
-            capturedLogs,
-            consoleIntercepted,
+            capturedLines,
           );
         }
         return originalJson.call(res, data);
@@ -1180,6 +1207,12 @@ class Polartrace {
       // Handle unhandled errors
       req.on("error", errorHandler);
       res.on("error", errorHandler);
+
+      // A connection that closes before any response (client abort) never
+      // reaches handleResponse - stop routing lines to it.
+      res.on("close", () => {
+        if (!isLogged) this.logCapture?.closeRequest(traceId, capturedLines);
+      });
 
       // Fallback: responses written via res.end() directly - Express's
       // finalhandler after a thrown route error, bare 404s without a
@@ -1195,8 +1228,7 @@ class Polartrace {
             undefined,
             startTimeMs,
             requestLog,
-            capturedLogs,
-            consoleIntercepted,
+            capturedLines,
           );
         }
       });
@@ -1216,11 +1248,6 @@ class Polartrace {
     return async (ctx: any, next: () => Promise<any>) => {
       const startTimeMs = Date.now();
       const startTime = new Date(startTimeMs).toISOString();
-      const capturedLogs: Array<{
-        timestamp: string;
-        level: string;
-        args: any[];
-      }> = [];
       const traceId = this.getActiveTraceId();
 
       const requestLog: Partial<RequestLog> = {
@@ -1244,11 +1271,7 @@ class Polartrace {
         requestLog.query = ctx.query;
       }
 
-      let consoleIntercepted = false;
-      if (this.config.captureConsoleLogs) {
-        this.interceptConsole(capturedLogs);
-        consoleIntercepted = true;
-      }
+      const capturedLines = this.logCapture?.openRequest(traceId);
 
       let thrown: any;
       try {
@@ -1270,11 +1293,9 @@ class Polartrace {
         if (this.config.captureBody && ctx.request?.body) {
           requestLog.body = this.redactSensitive(ctx.request.body);
         }
-        if (consoleIntercepted) {
-          this.restoreConsole();
-          if (capturedLogs.length > 0) {
-            requestLog.consoleLogs = capturedLogs;
-          }
+        this.logCapture?.closeRequest(traceId, capturedLines);
+        if (capturedLines && capturedLines.length > 0) {
+          requestLog.consoleLogs = capturedLines;
         }
         // koa-router records the matched path on the context; without a router
         // match a 404 means nothing handled the request.
@@ -1301,23 +1322,18 @@ class Polartrace {
     interface FastifyReqState {
       startTimeMs: number;
       traceId?: string;
-      capturedLogs: Array<{ timestamp: string; level: string; args: any[] }>;
-      consoleIntercepted: boolean;
+      capturedLines?: CapturedLine[];
       error?: any;
     }
     const states = new WeakMap<object, FastifyReqState>();
 
     app.addHook("onRequest", async (request: any) => {
+      const traceId = this.getActiveTraceId();
       const state: FastifyReqState = {
         startTimeMs: Date.now(),
-        traceId: this.getActiveTraceId(),
-        capturedLogs: [],
-        consoleIntercepted: false,
+        traceId,
+        capturedLines: this.logCapture?.openRequest(traceId),
       };
-      if (this.config.captureConsoleLogs) {
-        this.interceptConsole(state.capturedLogs);
-        state.consoleIntercepted = true;
-      }
       states.set(request, state);
       // Also ride the state on the request itself: NestJS (Fastify platform)
       // swallows route exceptions in its exception filters before Fastify's
@@ -1364,11 +1380,9 @@ class Polartrace {
       if (this.config.captureBody && request.body) {
         requestLog.body = this.redactSensitive(request.body);
       }
-      if (state.consoleIntercepted) {
-        this.restoreConsole();
-        if (state.capturedLogs.length > 0) {
-          requestLog.consoleLogs = state.capturedLogs;
-        }
+      this.logCapture?.closeRequest(state.traceId, state.capturedLines);
+      if (state.capturedLines && state.capturedLines.length > 0) {
+        requestLog.consoleLogs = state.capturedLines;
       }
       if (state.error) {
         requestLog.error = {
@@ -1393,8 +1407,7 @@ class Polartrace {
     data: any,
     startTimeMs: number,
     requestLog: Partial<RequestLog>,
-    capturedLogs: Array<{ timestamp: string; level: string; args: any[] }>,
-    consoleIntercepted: boolean,
+    capturedLines: CapturedLine[] | undefined,
   ): Response {
     const endTimeMs = Date.now();
     const duration = endTimeMs - startTimeMs;
@@ -1410,12 +1423,10 @@ class Polartrace {
       requestLog.body = this.redactSensitive(req.body);
     }
 
-    // Restore original console methods
-    if (consoleIntercepted) {
-      this.restoreConsole();
-      if (capturedLogs.length > 0) {
-        requestLog.consoleLogs = capturedLogs;
-      }
+    // The request is answered: later lines from its trace ship standalone.
+    this.logCapture?.closeRequest(requestLog.traceId, capturedLines);
+    if (capturedLines && capturedLines.length > 0) {
+      requestLog.consoleLogs = capturedLines;
     }
 
     // `req.route` is set by Express only when a route handler matched, so an
@@ -1428,62 +1439,6 @@ class Polartrace {
     this.logRequest(requestLog as RequestLog);
 
     return originalMethod.call(res, data);
-  }
-
-  private interceptConsole(
-    capturedLogs: Array<{ timestamp: string; level: string; args: any[] }>,
-  ): void {
-    if (!this.originalConsoleLog) {
-      this.originalConsoleLog = console.log;
-      this.originalConsoleError = console.error;
-      this.originalConsoleWarn = console.warn;
-      this.originalConsoleInfo = console.info;
-    }
-
-    console.log = (...args: any[]) => {
-      capturedLogs.push({
-        timestamp: new Date().toISOString(),
-        level: "log",
-        args: args,
-      });
-      this.originalConsoleLog!.apply(console, args);
-    };
-
-    console.error = (...args: any[]) => {
-      capturedLogs.push({
-        timestamp: new Date().toISOString(),
-        level: "error",
-        args: args,
-      });
-      this.originalConsoleError!.apply(console, args);
-    };
-
-    console.warn = (...args: any[]) => {
-      capturedLogs.push({
-        timestamp: new Date().toISOString(),
-        level: "warn",
-        args: args,
-      });
-      this.originalConsoleWarn!.apply(console, args);
-    };
-
-    console.info = (...args: any[]) => {
-      capturedLogs.push({
-        timestamp: new Date().toISOString(),
-        level: "info",
-        args: args,
-      });
-      this.originalConsoleInfo!.apply(console, args);
-    };
-  }
-
-  private restoreConsole(): void {
-    if (this.originalConsoleLog) {
-      console.log = this.originalConsoleLog;
-      console.error = this.originalConsoleError!;
-      console.warn = this.originalConsoleWarn!;
-      console.info = this.originalConsoleInfo!;
-    }
   }
 
   private redactSensitive(body: any): any {
@@ -1654,6 +1609,141 @@ class Polartrace {
         diagnostics.debug(`failed to send logs: ${error?.message}`);
       }
       throw error;
+    }
+  }
+
+  private queueStandaloneLine(line: StandaloneLine): void {
+    this.lineQueue.push(line);
+
+    // Bound the queue so a long collector outage doesn't grow memory unbounded.
+    if (this.lineQueue.length > this.LINE_QUEUE_LIMIT) {
+      this.lineQueue.splice(0, this.lineQueue.length - this.LINE_QUEUE_LIMIT);
+    }
+  }
+
+  /** The collector route for standalone lines: `<log endpoint>/lines`. */
+  private getLinesEndpoint(): string | undefined {
+    const endpoint = this.config.endpoint?.trim();
+    return endpoint ? `${endpoint.replace(/\/+$/, "")}/lines` : undefined;
+  }
+
+  /**
+   * Ship standalone lines. Same retain/drop semantics as request logs, but a
+   * tick may send several batches: a process logging steadily outside requests
+   * would otherwise fall behind a one-batch-per-tick budget and start dropping.
+   */
+  private async flushLogLines(): Promise<void> {
+    const url = this.getLinesEndpoint();
+    if (!url || this.isLineFlushing || this.lineQueue.length === 0) return;
+    if (Date.now() < this.lineBackoffUntil) return;
+
+    this.isLineFlushing = true;
+    try {
+      for (
+        let batch = 0;
+        batch < this.MAX_LINE_BATCHES_PER_TICK && this.lineQueue.length > 0;
+        batch++
+      ) {
+        const batchLength = Math.min(this.lineQueue.length, this.LINE_BATCH_SIZE);
+        const lines = this.lineQueue.slice(0, batchLength);
+
+        let status: number | undefined;
+        let retryAfterSeconds: number | undefined;
+        try {
+          const response = await this.postJson(url, { lines });
+          status = response.status;
+          retryAfterSeconds = response.retryAfterSeconds;
+        } catch (error: any) {
+          status = error?.response?.status;
+          diagnostics.debug(`Failed to send log lines: ${error?.message}`);
+        }
+
+        if (status !== undefined && status >= 200 && status < 300) {
+          this.lineQueue.splice(0, batchLength);
+          this.lineConsecutiveFailures = 0;
+          this.lineBackoffUntil = 0;
+          continue;
+        }
+
+        if (this.shouldRetainBatch(status)) {
+          // Transient failure (429/5xx/network) - keep the lines and back off.
+          this.lineConsecutiveFailures++;
+          this.lineBackoffUntil =
+            Date.now() + this.nextBackoffMs(this.lineConsecutiveFailures, retryAfterSeconds);
+        } else {
+          // Deterministic 4xx rejection - retrying the same payload can never succeed.
+          this.lineQueue.splice(0, batchLength);
+          this.lineConsecutiveFailures = 0;
+          this.lineBackoffUntil = 0;
+          diagnostics.warnOnce(
+            `drop:log-lines:${status}`,
+            `dropped ${batchLength} log lines rejected by collector (status ${status})`,
+          );
+        }
+        return;
+      }
+    } finally {
+      this.isLineFlushing = false;
+    }
+  }
+
+  /**
+   * Last-chance delivery from the process 'exit' event, where only synchronous
+   * work runs: `process.exit()` (a worker that cannot bind its port, a CLI
+   * that is done) and a crash end the process without waiting for the async
+   * flush, taking the lines that explain the exit with them.
+   *
+   * The send happens in a short-lived child process that this one waits for,
+   * bounded by EXIT_FLUSH_TIMEOUT_MS. It is skipped when nothing is queued,
+   * when the collector is known to be unreachable, and outside a plain Node
+   * runtime (Electron, packaged binaries), where execPath is not `node`.
+   */
+  public flushOnExit(): void {
+    const requests: Array<{ url: string; body: unknown }> = [];
+    const logsUrl = this.config.endpoint?.trim();
+    const linesUrl = this.getLinesEndpoint();
+    if (logsUrl && this.logQueue.length > 0) {
+      requests.push({
+        url: logsUrl,
+        body: { logs: this.logQueue.slice(0, this.MAX_BATCH_SIZE).map((item) => item.log) },
+      });
+    }
+    if (linesUrl && this.lineQueue.length > 0) {
+      requests.push({ url: linesUrl, body: { lines: this.lineQueue.slice(0, this.LINE_BATCH_SIZE) } });
+    }
+    if (requests.length === 0 || this.connectionStatus === "failed") return;
+
+    const versions = process.versions as Record<string, string | undefined>;
+    if (process.release?.name !== "node" || versions.electron || (process as any).pkg) return;
+
+    // The child must not boot an agent of its own (NODE_OPTIONS may preload us).
+    const env = { ...process.env };
+    delete env.NODE_OPTIONS;
+    delete env.POLARTRACE_APP_NAME;
+    delete env.POLARTRACE_LICENSE_KEY;
+
+    const sender =
+      "let d='';process.stdin.on('data',c=>d+=c).on('end',async()=>{" +
+      "const p=JSON.parse(d);await Promise.allSettled(p.requests.map(r=>fetch(r.url," +
+      "{method:'POST',headers:p.headers,body:JSON.stringify(r.body),signal:AbortSignal.timeout(p.timeoutMs)})));});";
+
+    try {
+      execFileSync(process.execPath, ["-e", sender], {
+        // The license key travels on stdin, never in argv where `ps` shows it.
+        input: JSON.stringify({
+          headers: this.defaultHeaders,
+          requests,
+          timeoutMs: this.EXIT_FLUSH_TIMEOUT_MS - 500,
+        }),
+        env,
+        stdio: ["pipe", "ignore", "ignore"],
+        timeout: this.EXIT_FLUSH_TIMEOUT_MS,
+        windowsHide: true,
+      });
+      this.logQueue.length = 0;
+      this.lineQueue.length = 0;
+    } catch {
+      // Exit must never be blocked or fail because of telemetry.
     }
   }
 
@@ -1941,6 +2031,7 @@ class Polartrace {
 
     const pending: Promise<unknown>[] = [];
     if (this.logQueue.length > 0) pending.push(this.flushLogs());
+    if (this.lineQueue.length > 0) pending.push(this.flushLogLines());
     if (this.traceQueue.length > 0) pending.push(this.flushTraces());
     if (this.hostMetricsQueue.length > 0) pending.push(this.flushHostMetrics());
 
@@ -1980,6 +2071,12 @@ class Polartrace {
       this.flushLogs().catch((err) => {
         const errorMsg = `Error flushing logs on destroy: ${err}`;
         diagnostics.debug(errorMsg);
+      });
+    }
+
+    if (this.lineQueue.length > 0) {
+      this.flushLogLines().catch((err) => {
+        diagnostics.debug(`Error flushing log lines on destroy: ${err}`);
       });
     }
 
@@ -2033,6 +2130,7 @@ function envFlag(name: string, fallback: boolean): boolean {
  * - POLARTRACE_ENDPOINT              override the collector URL
  * - POLARTRACE_LOG_FILE              append agent diagnostics to this path
  * - POLARTRACE_ENABLE_CONSOLE_LOG    mirror verbose diagnostics to stderr
+ * - POLARTRACE_DISABLE_LOG_CAPTURE   turn off console / winston / crash log capture
  * - POLARTRACE_DISABLE_HOST_METRICS  turn off CPU/memory/event-loop sampling
  * - POLARTRACE_DISABLE_MONGO_SPANS   turn off MongoDB span collection
  * - POLARTRACE_DISABLE_REDIS_SPANS   turn off Redis span collection
@@ -2063,6 +2161,7 @@ function autoInitFromEnv() {
       apiKey,
       serviceName,
       enableConsoleLog: envFlag("POLARTRACE_ENABLE_CONSOLE_LOG", false),
+      captureConsoleLogs: !envFlag("POLARTRACE_DISABLE_LOG_CAPTURE", false),
       enableHostMetrics: !envFlag("POLARTRACE_DISABLE_HOST_METRICS", false),
       enableMongoSpanCollection: !envFlag(
         "POLARTRACE_DISABLE_MONGO_SPANS",
@@ -2124,6 +2223,12 @@ function installShutdownHooks(agent: Polartrace): void {
 
   process.on("beforeExit", () => {
     void flushOnce();
+  });
+
+  // process.exit() and crashes skip beforeExit and never wait for the async
+  // flush - send what is left synchronously (see Polartrace.flushOnExit).
+  process.on("exit", () => {
+    agent.flushOnExit();
   });
 
   for (const signal of ["SIGTERM", "SIGINT"] as const) {

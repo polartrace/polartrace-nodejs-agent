@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.2] - 2026-10-19
+
+Requires the matching collector (`POST /api/log/lines`, relaxed request-log
+validation) to be deployed first.
+
+### Added
+
+- Application logs are captured from anywhere in the process, not only inside
+  a request: startup, cluster primaries, timers, queue consumers and work that
+  continues after the response now ship as standalone lines
+- winston support: every logger gets a Polartrace transport, so winston output
+  (which never goes through `console`) is captured with its real level,
+  metadata and error stack
+- `console.debug` and `console.trace` are captured
+- Uncaught exceptions and unhandled rejections are recorded as error lines,
+  without changing how the process crashes
+- Lines queued when the process ends through `process.exit()` or a crash are
+  delivered synchronously from the `exit` event (bounded to 2.5s)
+- Every line carries the machine hostname and process id, so cluster workers
+  can be told apart
+- `POLARTRACE_DISABLE_LOG_CAPTURE` turns log capture off
+
+### Fixed
+
+- Concurrent requests no longer lose or swap each other's console lines. The
+  console was patched per request and restored when the first request finished,
+  for all requests at once
+- Lines logged after the response is sent are no longer dropped; they keep
+  their trace id
+- Errors passed to `console.*` keep their stack (they were serialised as `{}`)
+- An argument that cannot be serialised (circular objects) can no longer wedge
+  the log queue
+- Logger metadata is redacted with the same rules as request data
+
 ## [2.0.1] - 2026-10-05
 
 ### Changed

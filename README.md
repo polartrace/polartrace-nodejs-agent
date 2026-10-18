@@ -70,6 +70,7 @@ services:
 | PostgreSQL | `pg` | Query spans with `db.operation`, `db.sql.table`, `db.statement` |
 | Redis | `ioredis`, `redis` ≥ 4 | Command spans |
 | Host metrics | Automatic | Process CPU/memory, event-loop lag, host load, cgroup limits |
+| Application logs | `console`, winston 3.x | Every line, in or out of a request, plus uncaught exceptions - see below |
 
 Every framework and driver above is optional. The agent patches only what your
 application actually loads, and installs nothing on your behalf.
@@ -92,6 +93,7 @@ The agent is configured entirely through environment variables.
 | `POLARTRACE_ENDPOINT` | `https://collector.polartrace.io/api/log` | Collector URL. |
 | `POLARTRACE_LOG_FILE` | *(none)* | Append the agent's own diagnostics to this path. |
 | `POLARTRACE_ENABLE_CONSOLE_LOG` | `false` | Mirror verbose agent diagnostics to stderr. |
+| `POLARTRACE_DISABLE_LOG_CAPTURE` | `false` | Turn off application log capture (console, winston, crashes). |
 | `POLARTRACE_DISABLE_HOST_METRICS` | `false` | Turn off CPU/memory/event-loop sampling. |
 | `POLARTRACE_DISABLE_MONGO_SPANS` | `false` | Turn off MongoDB span collection. |
 | `POLARTRACE_DISABLE_POSTGRES_SPANS` | `false` | Turn off PostgreSQL span collection. |
@@ -99,15 +101,37 @@ The agent is configured entirely through environment variables.
 
 Boolean variables accept `1` or `true`.
 
+## Application logs
+
+The agent captures what your application logs, wherever it logs it:
+
+- **`console`** - `log`, `info`, `warn`, `error`, `debug` and `trace`, recorded
+  exactly as printed (format specifiers applied, errors with their stack).
+- **winston** - every logger, whatever its transports, with the real level
+  (`http`, `verbose`... included), the metadata object and the error stack -
+  even when your own output format prints only the message.
+- **Crashes** - uncaught exceptions and unhandled rejections, observed without
+  changing how the process crashes.
+
+A line written while a request is in flight is attached to that request and its
+trace. Everything else - startup, a cluster primary, timers, queue consumers,
+work that continues after the response - ships as a standalone line with the
+machine's hostname and the process id, so cluster workers stay apart. Lines
+logged just before `process.exit()` or a crash are delivered before the process
+ends (bounded to 2.5 seconds).
+
+Your terminal output is unchanged: the agent records alongside your logger, it
+never replaces it.
+
 ## Data collection and redaction
 
 For each request the agent records method, path, status code, duration, client
-IP, user agent, headers, query parameters, body and any console output produced
+IP, user agent, headers, query parameters, body and the application logs written
 while handling it, along with the trace the request belongs to.
 
 Fields whose names contain `password`, `token`, `secret`, `apiKey`, `api-key`,
 `authorization`, `creditCard`, `ssn` or `cookie` are replaced with `[REDACTED]`
-before anything leaves the process - in nested objects and in **request headers**
+before anything leaves the process - in request data and in logger metadata alike - in nested objects and in **request headers**
 as well as at the top level, so `Authorization`, `Cookie` and `X-API-Key` never
 leave in the clear. Redaction happens client-side; the original values are never
 transmitted.
